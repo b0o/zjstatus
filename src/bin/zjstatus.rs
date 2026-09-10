@@ -101,6 +101,8 @@ impl ZellijPlugin for State {
             cols: 0,
             command_results: BTreeMap::new(),
             pipe_results: BTreeMap::new(),
+            tab_pipe_results: BTreeMap::new(),
+            tabs_initialized: false,
             mode: ModeInfo::default(),
             panes: PaneManifest::default(),
             plugin_uuid: uid.to_string(),
@@ -372,8 +374,7 @@ impl State {
                 tracing::Span::current().record("event_type", "Event::TabUpdate");
                 tracing::debug!(tab_count = ?tab_info.len());
 
-                self.state.cache_mask = UpdateEventMask::Tab as u8;
-                self.state.tabs = tab_info;
+                self.state.update_tabs(tab_info);
 
                 should_render = true;
             }

@@ -1,5 +1,5 @@
 use chrono::{Duration, Local};
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use std::{collections::BTreeMap, ops::Sub};
 use zellij_tile::prelude::*;
 

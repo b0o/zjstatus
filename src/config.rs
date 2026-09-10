@@ -16,6 +16,8 @@ pub struct ZellijState {
     pub cols: usize,
     pub command_results: BTreeMap<String, CommandResult>,
     pub pipe_results: BTreeMap<String, String>,
+    pub tab_pipe_results: BTreeMap<usize, BTreeMap<String, String>>,
+    pub tabs_initialized: bool,
     pub mode: ModeInfo,
     pub panes: PaneManifest,
     pub plugin_uuid: String,
@@ -26,6 +28,16 @@ pub struct ZellijState {
     pub cache_mask: u8,
     pub focused_pane_id: Option<PaneId>,
     pub focused_pane_cwd: Option<std::path::PathBuf>,
+}
+
+impl ZellijState {
+    pub fn update_tabs(&mut self, tabs: Vec<TabInfo>) {
+        self.tab_pipe_results
+            .retain(|id, _| tabs.iter().any(|tab| tab.tab_id == *id));
+        self.tabs_initialized = true;
+        self.tabs = tabs;
+        self.cache_mask |= UpdateEventMask::Tab as u8;
+    }
 }
 
 #[derive(Clone, Debug, Ord, Eq, PartialEq, PartialOrd, Copy)]

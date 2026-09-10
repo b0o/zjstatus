@@ -1,9 +1,5 @@
 layout {
-    pane split_direction="vertical" {
-        pane
-    }
-
-    pane size=2 borderless=true {
+    pane_template name="status" borderless=true {
         plugin location="file:target/wasm32-wasip1/debug/zjstatus.wasm" {
             color_blue   "#89B4FA"
             color_yellow "yellow"
@@ -21,6 +17,11 @@ layout {
             notification_show_interval "10"
 
             pipe_1_format "#[fg=red] {output}"
+
+            tab_pipe_git_format "#[fg=$blue,bg=$bg] [{output}]"
+            tab_pipe_git_rendermode "static"
+            tab_pipe_build_format "#[fg=$yellow,bg=$bg] ({output})"
+            tab_pipe_build_rendermode "dynamic"
 
             border_enabled  "true"
             border_char     "─"
@@ -40,13 +41,13 @@ layout {
             mode_tmux            "#[bg=$yellow] "
             mode_default_to_mode "tmux"
 
-            tab_normal              "#[fg=#6C7086,bg=$bg] {index} {name} {floating_indicator}{bell_indicator} "
-            tab_rename              "#[fg=#eba0ac,bg=$bg] {index} {name} {floating_indicator} "
-            tab_normal_fullscreen   "#[fg=#6C7086,bg=$bg] {index} {name} [] "
-            tab_normal_sync         "#[fg=#6C7086,bg=$bg] {index} {name} <> "
-            tab_normal_bell         "#[fg=#f38ba8,bg=$bg,bold] {index} {name} {bell_indicator} "
-            tab_normal_flashing_bell "#[fg=$bg,bg=#f38ba8,bold] {index} {name} {bell_indicator} "
-            tab_active              "#[fg=#9399B2,bg=$bg,bold,italic] {index} {name} {floating_total_count}{floating_indicator}{sync_indicator}{fullscreen_indicator}"
+            tab_normal              "#[fg=#6C7086,bg=$bg] {index} {name}{tab_pipe_git}{tab_pipe_build} {floating_indicator}{bell_indicator} "
+            tab_rename              "#[fg=#eba0ac,bg=$bg] {index} {name}{tab_pipe_git}{tab_pipe_build} {floating_indicator} "
+            tab_normal_fullscreen   "#[fg=#6C7086,bg=$bg] {index} {name}{tab_pipe_git}{tab_pipe_build} [] "
+            tab_normal_sync         "#[fg=#6C7086,bg=$bg] {index} {name}{tab_pipe_git}{tab_pipe_build} <> "
+            tab_normal_bell         "#[fg=#f38ba8,bg=$bg,bold] {index} {name}{tab_pipe_git}{tab_pipe_build} {bell_indicator} "
+            tab_normal_flashing_bell "#[fg=$bg,bg=#f38ba8,bold] {index} {name}{tab_pipe_git}{tab_pipe_build} {bell_indicator} "
+            tab_active              "#[fg=#9399B2,bg=$bg,bold,italic] {index} {name}{tab_pipe_git}{tab_pipe_build} {floating_total_count}{floating_indicator}{sync_indicator}{fullscreen_indicator}"
             tab_separator           "#[fg=#6C7086,bg=$bg] | "
             tab_floating_indicator  "F"
             tab_sync_indicator      "S"
@@ -87,4 +88,11 @@ layout {
             datetime_timezone    "Europe/Berlin"
         }
     }
+
+    default_tab_template {
+        children
+        status size=2
+    }
+    tab name="first" { pane; }
+    tab name="second" { pane; }
 }

@@ -1,14 +1,8 @@
-use lazy_static::lazy_static;
-use regex::Regex;
 use std::collections::BTreeMap;
 
 use crate::render::{FormattedPart, formatted_parts_from_string_cached};
 
 use super::widget::Widget;
-
-lazy_static! {
-    static ref PIPE_REGEX: Regex = Regex::new("_[a-zA-Z0-9]+$").unwrap();
-}
 
 #[derive(Clone, Debug, PartialEq)]
 enum RenderMode {
@@ -23,15 +17,16 @@ pub struct PipeWidget {
 }
 
 #[derive(Clone)]
-struct PipeConfig {
+pub(crate) struct PipeConfig {
     format: Vec<FormattedPart>,
     render_mode: RenderMode,
+    literal_prefix: bool,
 }
 
 impl PipeWidget {
     pub fn new(config: &BTreeMap<String, String>) -> Self {
         Self {
-            config: parse_config(config),
+            config: parse_config(config, "pipe_"),
             zj_conf: config.clone(),
         }
     }
@@ -55,7 +50,15 @@ impl Widget for PipeWidget {
             }
         };
 
-        let content = pipe_config
+        pipe_config.render(pipe_result, &self.zj_conf)
+    }
+
+    fn process_click(&self, _name: &str, _state: &crate::config::ZellijState, _pos: usize) {}
+}
+
+impl PipeConfig {
+    pub(crate) fn render(&self, pipe_result: &str, zj_conf: &BTreeMap<String, String>) -> String {
+        let content = self
             .format
             .iter()
             .map(|f| {
@@ -71,21 +74,26 @@ impl Widget for PipeWidget {
                 (f, content)
             })
             .fold("".to_owned(), |acc, (f, content)| {
-                if pipe_config.render_mode == RenderMode::Static {
+                if self.render_mode == RenderMode::Static {
                     return format!("{acc}{}", f.format_string(&content));
                 }
 
                 format!("{acc}{}", content)
             });
 
-        match pipe_config.render_mode {
+        match self.render_mode {
             RenderMode::Static => content,
-            RenderMode::Dynamic => render_dynamic_formatted_content(&content, &self.zj_conf),
+            RenderMode::Dynamic => {
+                let content = if self.literal_prefix {
+                    format!("#[]{content}")
+                } else {
+                    content
+                };
+                render_dynamic_formatted_content(&content, zj_conf)
+            }
             RenderMode::Raw => pipe_result.to_owned(),
         }
     }
-
-    fn process_click(&self, _name: &str, _state: &crate::config::ZellijState, _pos: usize) {}
 }
 
 fn render_dynamic_formatted_content(content: &str, config: &BTreeMap<String, String>) -> String {
@@ -96,45 +104,112 @@ fn render_dynamic_formatted_content(content: &str, config: &BTreeMap<String, Str
         .join("")
 }
 
-fn parse_config(zj_conf: &BTreeMap<String, String>) -> BTreeMap<String, PipeConfig> {
-    let mut keys: Vec<String> = zj_conf
-        .keys()
-        .filter(|k| k.starts_with("pipe_"))
-        .cloned()
-        .collect();
-    keys.sort();
-
+pub(crate) fn parse_config(
+    zj_conf: &BTreeMap<String, String>,
+    prefix: &str,
+) -> BTreeMap<String, PipeConfig> {
     let mut config: BTreeMap<String, PipeConfig> = BTreeMap::new();
 
-    for key in keys {
-        let pipe_name = PIPE_REGEX.replace(&key, "").to_string();
-        let mut pipe_conf = PipeConfig {
-            format: vec![],
-            render_mode: RenderMode::Static,
+    for (key, value) in zj_conf.iter().filter(|(key, _)| key.starts_with(prefix)) {
+        let Some(pipe_name) = key
+            .strip_suffix("_format")
+            .or_else(|| key.strip_suffix("_rendermode"))
+        else {
+            continue;
         };
+        let pipe_conf = config
+            .entry(pipe_name.to_owned())
+            .or_insert_with(|| PipeConfig {
+                format: vec![],
+                render_mode: RenderMode::Static,
+                literal_prefix: prefix == "tab_pipe_",
+            });
 
-        if let Some(existing_conf) = config.get(pipe_name.as_str()) {
-            pipe_conf = existing_conf.clone();
+        if key.ends_with("_format") {
+            // A neutral style marker protects literal ']' in the first text span.
+            // Global pipes retain their legacy interpretation of bare style prefixes.
+            let value = if pipe_conf.literal_prefix {
+                format!("#[]{value}")
+            } else {
+                value.clone()
+            };
+            pipe_conf.format = FormattedPart::multiple_from_format_string(&value, zj_conf);
         }
 
-        if key.ends_with("format") {
-            pipe_conf.format =
-                FormattedPart::multiple_from_format_string(zj_conf.get(&key).unwrap(), zj_conf);
-        }
-
-        if key.ends_with("rendermode") {
-            pipe_conf.render_mode = match zj_conf.get(&key) {
-                Some(mode) => match mode.as_str() {
-                    "static" => RenderMode::Static,
-                    "dynamic" => RenderMode::Dynamic,
-                    "raw" => RenderMode::Raw,
-                    _ => RenderMode::Static,
-                },
-                None => RenderMode::Static,
+        if key.ends_with("_rendermode") {
+            pipe_conf.render_mode = match value.as_str() {
+                "dynamic" => RenderMode::Dynamic,
+                "raw" => RenderMode::Raw,
+                _ => RenderMode::Static,
             };
         }
-
-        config.insert(pipe_name, pipe_conf);
     }
     config
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::config::ZellijState;
+
+    #[test]
+    fn shared_configuration_and_rendering_preserve_global_pipe_modes() {
+        for (mode, expected) in [
+            ("static", "(#[bold]value {name} {output})"),
+            ("invalid", "(#[bold]value {name} {output})"),
+            ("dynamic", "(value {name} {output})"),
+            ("raw", "#[bold]value {name} {output}\n"),
+        ] {
+            let config = BTreeMap::from([
+                (
+                    "pipe_build_status_format".to_owned(),
+                    "({output})".to_owned(),
+                ),
+                ("pipe_build_status_rendermode".to_owned(), mode.to_owned()),
+                (
+                    "tab_pipe_build_status_format".to_owned(),
+                    "ignored".to_owned(),
+                ),
+                (
+                    "tab_pipe_build_status_unknown_suffix".to_owned(),
+                    "ignored".to_owned(),
+                ),
+            ]);
+            let mut state = ZellijState::default();
+            state.pipe_results.insert(
+                "pipe_build_status".to_owned(),
+                "#[bold]value {name} {output}\n".to_owned(),
+            );
+            let widget = PipeWidget::new(&config);
+            assert_eq!(
+                console::strip_ansi_codes(&widget.process("pipe_build_status", &state)),
+                expected,
+                "{mode}"
+            );
+            assert_eq!(widget.process("tab_pipe_build_status", &state), "");
+            assert_eq!(parse_config(&config, "tab_pipe_").len(), 1);
+            state.pipe_results.clear();
+            assert_eq!(widget.process("pipe_build_status", &state), "");
+        }
+    }
+
+    #[test]
+    fn missing_formats_and_default_mode_keep_existing_semantics() {
+        for (mode, expected) in [
+            ("static", ""),
+            ("dynamic", ""),
+            ("invalid", ""),
+            ("raw", "value"),
+        ] {
+            let config = BTreeMap::from([("pipe_test_rendermode".to_owned(), mode.to_owned())]);
+            assert_eq!(
+                parse_config(&config, "pipe_")["pipe_test"].render("value", &config),
+                expected
+            );
+        }
+        let config = BTreeMap::from([("pipe_test_format".to_owned(), "({output})".to_owned())]);
+        let pipe = &parse_config(&config, "pipe_")["pipe_test"];
+        assert_eq!(pipe.render("#[bold]value", &config), "(#[bold]value)");
+        assert_eq!(pipe.render("", &config), "()");
+    }
 }

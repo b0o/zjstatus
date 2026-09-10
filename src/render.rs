@@ -194,10 +194,14 @@ impl FormattedPart {
         }
         tracing::debug!(msg = "miss", typ = "format_string", format = self.content);
 
-        let mut output = self.content.clone();
+        let mut output = String::with_capacity(self.content.len());
+        let mut end = 0;
 
-        for widget in WIDGET_REGEX.captures_iter(&self.content) {
-            let match_name = widget.get(0).unwrap().as_str();
+        // Substitute only original template spans, never text returned by a widget.
+        for widget in WIDGET_REGEX.find_iter(&self.content) {
+            output.push_str(&self.content[end..widget.start()]);
+            end = widget.end();
+            let match_name = widget.as_str();
             let widget_key = match_name.trim_matches(|c| c == '{' || c == '}');
             let mut widget_key_name = widget_key;
 
@@ -216,7 +220,7 @@ impl FormattedPart {
                 && let Some(res) = self.cache.get(widget_key)
             {
                 tracing::debug!(msg = "hit", typ = "widget", widget = widget_key);
-                output = output.replace(match_name, res);
+                output.push_str(res);
                 continue;
             }
 
@@ -235,8 +239,9 @@ impl FormattedPart {
 
             self.cache.insert(widget_key.to_owned(), result.to_owned());
 
-            output = output.replace(match_name, &result);
+            output.push_str(&result);
         }
+        output.push_str(&self.content[end..]);
 
         let res = self.format_string(&output);
         self.cached_content.clone_from(&res);
@@ -377,6 +382,152 @@ fn color_by_name(color: &str) -> Option<AnsiColor> {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn widget_output_is_not_expanded_again_in_any_pipe_mode_or_cache_path() {
+        use crate::{
+            pipe::parse_protocol,
+            widgets::{pipe::PipeWidget, tabs::TabsWidget},
+        };
+        use zellij_tile::prelude::TabInfo;
+
+        for (mode, value, expected_tab) in [
+            (
+                "static",
+                "{pipe_global}{tabs}#[bold]value",
+                "({pipe_global}{tabs}#[bold]value)",
+            ),
+            (
+                "dynamic",
+                "{pipe_global}{tabs}#[bold]value",
+                "({pipe_global}{tabs}value)",
+            ),
+            (
+                "raw",
+                "\x1b[1m{pipe_global}{tabs}value",
+                "{pipe_global}{tabs}value",
+            ),
+        ] {
+            let config = BTreeMap::from([
+                ("tab_normal".to_owned(), "{tab_pipe_git}".to_owned()),
+                ("tab_pipe_git_format".to_owned(), "({output})".to_owned()),
+                ("tab_pipe_git_rendermode".to_owned(), mode.to_owned()),
+                ("pipe_global_format".to_owned(), "{output}".to_owned()),
+            ]);
+            let widgets: BTreeMap<String, Arc<dyn Widget>> = BTreeMap::from([
+                (
+                    "tabs".to_owned(),
+                    Arc::new(TabsWidget::new(&config)) as Arc<dyn Widget>,
+                ),
+                (
+                    "pipe".to_owned(),
+                    Arc::new(PipeWidget::new(&config)) as Arc<dyn Widget>,
+                ),
+            ]);
+
+            for template in [
+                "before{tabs}after",
+                "{tabs}/{tabs}",
+                "{tabs}/{pipe_global}/{tabs}",
+            ] {
+                let mut state = ZellijState::default();
+                state.update_tabs(vec![TabInfo {
+                    tab_id: 42,
+                    ..Default::default()
+                }]);
+                parse_protocol(&mut state, &format!("zjstatus::tab_pipe::42::git::{value}"));
+                let mut part = FormattedPart::from_format_string(template, &config);
+
+                // Cold render, warmed caches, then a global-only update with cached tabs.
+                for global in ["G", "G", "H"] {
+                    parse_protocol(
+                        &mut state,
+                        &format!("zjstatus::pipe::pipe_global::{global}"),
+                    );
+                    let expected = match template {
+                        "before{tabs}after" => format!("before{expected_tab}after"),
+                        "{tabs}/{tabs}" => format!("{expected_tab}/{expected_tab}"),
+                        _ => format!("{expected_tab}/{global}/{expected_tab}"),
+                    };
+                    let rendered = part.format_string_with_widgets(&widgets, &state);
+                    assert_eq!(
+                        console::strip_ansi_codes(&rendered),
+                        expected,
+                        "mode={mode}, template={template}, global={global}"
+                    );
+                    assert_eq!(console::strip_ansi_codes(&part.cache["tabs"]), expected_tab);
+                    state.cache_mask = 0;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tab_pipe_writes_and_clears_refresh_both_warmed_cache_layers() {
+        use crate::{
+            pipe::parse_protocol,
+            widgets::{pipe::PipeWidget, tabs::TabsWidget},
+        };
+        use zellij_tile::prelude::TabInfo;
+
+        let config = BTreeMap::from([
+            ("tab_normal".to_owned(), "{name}{tab_pipe_git}".to_owned()),
+            ("tab_pipe_git_format".to_owned(), "({output})".to_owned()),
+            ("pipe_global_format".to_owned(), "{output}".to_owned()),
+        ]);
+        let widgets: BTreeMap<String, Arc<dyn Widget>> = BTreeMap::from([
+            (
+                "tabs".to_owned(),
+                Arc::new(TabsWidget::new(&config)) as Arc<dyn Widget>,
+            ),
+            (
+                "pipe".to_owned(),
+                Arc::new(PipeWidget::new(&config)) as Arc<dyn Widget>,
+            ),
+        ]);
+        // Exercise the outer cache, then the widget cache within an Always fragment.
+        for template in ["{tabs}", "{tabs}{pipe_global}"] {
+            let mut part = FormattedPart::from_format_string(template, &config);
+            let mut state = ZellijState::default();
+            state.update_tabs(vec![TabInfo {
+                tab_id: 42,
+                position: 0,
+                name: "tab".to_owned(),
+                ..Default::default()
+            }]);
+            let initial = part.format_string_with_widgets(&widgets, &state);
+            assert_eq!(console::strip_ansi_codes(&initial), "tab");
+            state.cache_mask = 0;
+            assert_eq!(part.format_string_with_widgets(&widgets, &state), initial);
+            assert_eq!(part.cached_content, initial);
+            assert_eq!(part.cache["tabs"], "tab");
+
+            for (value, expected, changed) in [
+                ("main", "tab(main)", true),
+                ("main", "tab(main)", false),
+                ("next", "tab(next)", true),
+                ("", "tab", true),
+                ("", "tab", false),
+            ] {
+                state.cache_mask = 0;
+                assert_eq!(
+                    parse_protocol(&mut state, &format!("zjstatus::tab_pipe::42::git::{value}")),
+                    changed
+                );
+                let rendered = part.format_string_with_widgets(&widgets, &state);
+                assert_eq!(console::strip_ansi_codes(&rendered), expected);
+                assert_eq!(console::strip_ansi_codes(&part.cache["tabs"]), expected);
+                state.cache_mask = 0;
+                assert_eq!(part.format_string_with_widgets(&widgets, &state), rendered);
+            }
+        }
+        let mut outer = FormattedPart::from_format_string("{tab_pipe_git}", &config);
+        assert_eq!(outer.cache_mask, UpdateEventMask::None as u8);
+        assert_eq!(
+            outer.format_string_with_widgets(&widgets, &ZellijState::default()),
+            "Use of uninitialized widget"
+        );
+    }
 
     #[test]
     fn test_hex_to_rgb() {

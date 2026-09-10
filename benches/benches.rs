@@ -1,11 +1,11 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use std::{collections::BTreeMap, sync::Arc};
 use zellij_tile::prelude::{ModeInfo, TabInfo};
 
 use zjstatus::{
     config::{ModuleConfig, ZellijState},
     render::{
-        formatted_part_from_string_cached, formatted_parts_from_string_cached, FormattedPart,
+        FormattedPart, formatted_part_from_string_cached, formatted_parts_from_string_cached,
     },
     widgets::{datetime::DateTimeWidget, mode::ModeWidget, session::SessionWidget, widget::Widget},
 };
