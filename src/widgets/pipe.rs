@@ -20,7 +20,6 @@ pub struct PipeWidget {
 pub(crate) struct PipeConfig {
     format: Vec<FormattedPart>,
     render_mode: RenderMode,
-    literal_prefix: bool,
 }
 
 impl PipeWidget {
@@ -83,16 +82,60 @@ impl PipeConfig {
 
         match self.render_mode {
             RenderMode::Static => content,
-            RenderMode::Dynamic => {
-                let content = if self.literal_prefix {
-                    format!("#[]{content}")
-                } else {
-                    content
-                };
-                render_dynamic_formatted_content(&content, zj_conf)
-            }
+            RenderMode::Dynamic => render_dynamic_formatted_content(&content, zj_conf),
             RenderMode::Raw => pipe_result.to_owned(),
         }
+    }
+
+    pub(crate) fn render_in_tab(
+        &self,
+        value: &str,
+        zj_conf: &BTreeMap<String, String>,
+        tab_style: &FormattedPart,
+    ) -> String {
+        if value.is_empty() {
+            return String::new();
+        }
+        if self.render_mode == RenderMode::Raw {
+            return format!("\x1b[0m{value}\x1b[0m");
+        }
+
+        let inherit = |part: &FormattedPart, base: &FormattedPart| FormattedPart {
+            fg: part.fg.or(base.fg),
+            bg: part.bg.or(base.bg),
+            us: part.us.or(base.us),
+            effects: part.effects | base.effects,
+            ..Default::default()
+        };
+        let mut output = String::new();
+        for part in &self.format {
+            let content = part
+                .content
+                .replace("{output}", value.strip_suffix('\n').unwrap_or(value));
+            if content.is_empty() {
+                continue;
+            }
+            let style = inherit(part, tab_style);
+            if self.render_mode == RenderMode::Static {
+                output.push_str(&style.format_string(&content));
+                continue;
+            }
+
+            // Parse producer markup once, keeping the wrapper style as its base.
+            // The initial text is literal, including any ']' characters.
+            let mut spans = content.split("#[");
+            output.push_str(&style.format_string(spans.next().unwrap_or_default()));
+            for span in spans {
+                let part = FormattedPart::from_format_string(span, zj_conf);
+                let base = if span.starts_with(']') {
+                    tab_style // Explicit #[] clears badge overrides, not the tab style.
+                } else {
+                    &style
+                };
+                output.push_str(&inherit(&part, base).format_string(&part.content));
+            }
+        }
+        output
     }
 }
 
@@ -122,13 +165,12 @@ pub(crate) fn parse_config(
             .or_insert_with(|| PipeConfig {
                 format: vec![],
                 render_mode: RenderMode::Static,
-                literal_prefix: prefix == "tab_pipe_",
             });
 
         if key.ends_with("_format") {
             // A neutral style marker protects literal ']' in the first text span.
             // Global pipes retain their legacy interpretation of bare style prefixes.
-            let value = if pipe_conf.literal_prefix {
+            let value = if prefix == "tab_pipe_" {
                 format!("#[]{value}")
             } else {
                 value.clone()
@@ -211,5 +253,63 @@ mod test {
         let pipe = &parse_config(&config, "pipe_")["pipe_test"];
         assert_eq!(pipe.render("#[bold]value", &config), "(#[bold]value)");
         assert_eq!(pipe.render("", &config), "()");
+    }
+
+    #[test]
+    fn tab_pipe_static_spans_merge_attributes_and_reset_to_tab_style() {
+        let config = BTreeMap::from([(
+            "tab_pipe_test_format".to_owned(),
+            " [{output}]#[fg=blue,italic] blue#[] reset".to_owned(),
+        )]);
+        let base = FormattedPart::from_format_string("#[fg=white,bg=black,us=red,bold]", &config);
+        let override_style =
+            FormattedPart::from_format_string("#[fg=blue,bg=black,us=red,bold,italic]", &config);
+        let pipe = &parse_config(&config, "tab_pipe_")["tab_pipe_test"];
+        assert_eq!(
+            pipe.render_in_tab("hello", &config, &base),
+            format!(
+                "{}{}{}",
+                base.format_string(" [hello]"),
+                override_style.format_string(" blue"),
+                base.format_string(" reset")
+            )
+        );
+        assert_eq!(pipe.render_in_tab("", &config, &base), "");
+    }
+
+    #[test]
+    fn tab_pipe_dynamic_markup_inherits_wrapper_styles_and_resets_to_tab_style() {
+        let config = BTreeMap::from([
+            (
+                "tab_pipe_test_format".to_owned(),
+                "#[fg=blue] [{output}]".to_owned(),
+            ),
+            ("tab_pipe_test_rendermode".to_owned(), "dynamic".to_owned()),
+        ]);
+        let base = FormattedPart::from_format_string("#[fg=white,bg=black,us=red,bold]", &config);
+        let wrapper = FormattedPart::from_format_string("#[fg=blue,bg=black,us=red,bold]", &config);
+        let producer =
+            FormattedPart::from_format_string("#[fg=blue,bg=black,us=red,bold,italic]", &config);
+        let pipe = &parse_config(&config, "tab_pipe_")["tab_pipe_test"];
+        assert_eq!(
+            pipe.render_in_tab("prefix#[italic]hello#[]reset {output}", &config, &base),
+            format!(
+                "{}{}{}",
+                wrapper.format_string(" [prefix"),
+                producer.format_string("hello"),
+                base.format_string("reset {output}]")
+            )
+        );
+        let producer =
+            FormattedPart::from_format_string("#[fg=green,bg=black,us=red,bold]", &config);
+        assert_eq!(
+            pipe.render_in_tab("prefix#[fg=green]hello", &config, &base),
+            format!(
+                "{}{}",
+                wrapper.format_string(" [prefix"),
+                producer.format_string("hello]")
+            )
+        );
+        assert_eq!(pipe.render_in_tab("", &config, &base), "");
     }
 }

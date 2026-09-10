@@ -391,10 +391,7 @@ impl TabsWidget {
                         .and_then(|fields| fields.get(&capture[1]))
                         .filter(|value| !value.is_empty())
                 {
-                    // Pipe styles are self-contained, including unstyled/raw ANSI output.
-                    output.push_str("\x1b[0m");
-                    output.push_str(&config.render(value, &self.zj_conf));
-                    output.push_str("\x1b[0m");
+                    output.push_str(&config.render_in_tab(value, &self.zj_conf, f));
                 }
                 end = placeholder.end();
             }
@@ -669,7 +666,7 @@ mod test {
     }
 
     #[test]
-    fn tab_pipe_modes_and_style_boundaries_are_self_contained() {
+    fn tab_pipe_modes_inherit_styles_and_restore_tab_text() {
         for (mode, value, visible) in [
             ("static", "#[bold]value", "(#[bold]value)"),
             ("dynamic", "#[bold]value {name}", "(value {name})"),
@@ -678,7 +675,7 @@ mod test {
             let (mut config, mut state) = pipe_fixture();
             config.insert(
                 "tab_normal".to_owned(),
-                "#[fg=red,bold]before{tab_pipe_git}after#[fg=blue]next".to_owned(),
+                "#[fg=red,bg=black,bold]before{tab_pipe_git}after#[fg=blue]next".to_owned(),
             );
             config.insert("tab_pipe_git_rendermode".to_owned(), mode.to_owned());
             parse_protocol(&mut state, &format!("zjstatus::tab_pipe::42::git::{value}"));
@@ -688,14 +685,23 @@ mod test {
                 console::strip_ansi_codes(&output),
                 format!("before{visible}afternext")
             );
-            let outer = FormattedPart::from_format_string("#[fg=red,bold]", &config);
+            let outer = FormattedPart::from_format_string("#[fg=red,bg=black,bold]", &config);
             let next = FormattedPart::from_format_string("#[fg=blue]", &config);
+            let expected_pipe = match mode {
+                "static" => outer.format_string("(#[bold]value)"),
+                "dynamic" => format!(
+                    "{}{}",
+                    outer.format_string("("),
+                    outer.format_string("value {name})")
+                ),
+                _ => "\x1b[0m\x1b[32mraw\x1b[0m".to_owned(),
+            };
             assert_eq!(
                 output,
                 format!(
-                    "{}\x1b[0m{}\x1b[0m{}{}",
+                    "{}{}{}{}",
                     outer.format_string("before"),
-                    widget.tab_pipe_config["tab_pipe_git"].render(value, &config),
+                    expected_pipe,
                     outer.format_string("after"),
                     next.format_string("next")
                 )
@@ -707,18 +713,66 @@ mod test {
             );
             let widget = TabsWidget::new(&config);
             let output = widget.render_tab(&state.tabs[0], &state);
-            assert!(output.ends_with("\x1b[0mplain"));
             assert_eq!(
                 console::strip_ansi_codes(&output),
                 format!("{visible}{visible}plain")
             );
             config.insert("tab_normal".to_owned(), "{tab_pipe_git}".to_owned());
             let widget = TabsWidget::new(&config);
-            assert!(
-                widget
-                    .render_tab(&state.tabs[0], &state)
-                    .ends_with("\x1b[0m")
+            assert_eq!(
+                console::strip_ansi_codes(&widget.render_tab(&state.tabs[0], &state)),
+                visible
             );
+        }
+    }
+
+    #[test]
+    fn adjacent_pipes_inherit_active_normal_and_bell_styles_independently() {
+        for (key, active, bell, style) in [
+            ("tab_active", true, false, "#[bg=#555555,fg=#ffffff,bold]"),
+            ("tab_normal", false, false, "#[bg=#222222,fg=#aaaaaa]"),
+            ("tab_normal_bell", false, true, "#[bg=red,fg=white,italic]"),
+        ] {
+            let (mut config, mut state) = pipe_fixture();
+            config.insert(
+                key.to_owned(),
+                format!(
+                    "{style} BEFORE{{tab_pipe_git}}{{tab_pipe_plain}}{{tab_pipe_absent}} AFTER "
+                ),
+            );
+            config.insert(
+                "tab_pipe_git_format".to_owned(),
+                "#[fg=blue] [{output}]".to_owned(),
+            );
+            config.insert("tab_pipe_plain_format".to_owned(), " [{output}]".to_owned());
+            config.insert(
+                "tab_pipe_absent_format".to_owned(),
+                " [{output}]".to_owned(),
+            );
+            state.tabs[0].active = active;
+            state.tabs[0].has_bell_notification = bell;
+            parse_protocol(&mut state, "zjstatus::tab_pipe::42::plain::hello");
+            let widget = TabsWidget::new(&config);
+            let outer = FormattedPart::from_format_string(style, &config);
+            let mut badge = outer.clone();
+            badge.fg = FormattedPart::from_format_string("#[fg=blue]", &config).fg;
+            let expected = format!(
+                "{}{}{}{}{}{}",
+                outer.format_string(" BEFORE"),
+                badge.format_string(" [main]"),
+                outer.format_string(""),
+                outer.format_string(" [hello]"),
+                outer.format_string(""),
+                outer.format_string(" AFTER ")
+            );
+            assert_eq!(widget.render_tab(&state.tabs[0], &state), expected, "{key}");
+            parse_protocol(
+                &mut state,
+                "zjstatus::tab_pipe::42::git::\nzjstatus::tab_pipe::42::plain::",
+            );
+            let output = widget.render_tab(&state.tabs[0], &state);
+            assert_eq!(console::strip_ansi_codes(&output), " BEFORE AFTER ");
+            assert!(!output.contains("\x1b[34m"));
         }
     }
 
